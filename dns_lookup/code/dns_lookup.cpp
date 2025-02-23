@@ -6,128 +6,12 @@
  * https://datatracker.ietf.org/doc/html/rfc1035
  **/
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <string.h>
+#include "dns_lookup.h"
+#include "dns_app.h"
 
-#include <winsock2.h>
-#include <windows.h>
-
-typedef int32_t b32;
-#define ArrayCount(Array) (sizeof((Array)) / sizeof((Array)[0]))
-
-#pragma comment(lib, "ws2_32.lib")
-
-#pragma pack(push, 1)
-struct dns_header
-{
-    uint16_t ID;
-
-    uint8_t RecursionDesired : 1;
-    uint8_t TruncateFlag : 1;
-    uint8_t AuthorativeAnswerFlag : 1;
-    uint8_t OpCode : 4;
-    uint8_t QueryReponseFlag : 1;
-    uint8_t ResponseCode : 4;
-    uint8_t CheckingDisabled : 1;
-    uint8_t AuthenticatedData : 1;
-    uint8_t ZeroReserved_ : 1;
-    uint8_t RecursionAvailable : 1;
-
-    uint16_t QuestionCount;
-    uint16_t AnswerCount;
-    uint16_t AuthorityRecordCount;
-    uint16_t AdditionalRecordCount;
-};
-
-struct dns_question
-{
-    // NOTE(rick): An N-length "Name" field preceeds the Type field.
-    // The name is a sequence of a length octet followed by length count of
-    // octets ending with a terminating length zero octet.
-    uint16_t Type;
-    uint16_t Class;
-};
-
-struct dns_answer
-{
-    uint16_t NameOffset; // NOTE(rick): Bytes from the beginning of the message
-                         // to the location of the name that this answer is for.
-    union
-    {
-        struct
-        {
-            uint16_t Type;
-            uint16_t Class;
-            uint32_t TimeToLive;
-            uint16_t RDLength;
-        };
-        uint16_t E[4];
-    };
-};
-#pragma pack(pop)
-
-enum resource_record_class
-{
-    RRClass_IN = 1, // NOTE(rick): Internet
-    RRClass_CS, // NOTE(rick): CSNet (Obsolete)
-    RRClass_CH, // NOTE(rick): Chaos
-    RRClass_HS, // NOTE(rick): Hesiod
-
-    RRClass_Count,
-};
-
-enum resource_record_type
-{
-    RRType_A = 1, // NOTE(rick): A host address
-    RRType_NS, // NOTE(rick): An authoritative name server
-    RRType_MD, // NOTE(rick): A mail destination (Obsolete - use MX)
-    RRType_MF, // NOTE(rick): A mail forwarder (Obsolete - use MX)
-    RRType_CNAME, // NOTE(rick): The canonical name for an alias
-    RRType_SOA, // NOTE(rick): Marks the start of a zone of authority
-    RRType_MB, // NOTE(rick): A mailbox domain name (experimental)
-    RRType_MG, // NOTE(rick): A mail group member (experimental)
-    RRType_MR, // NOTE(rick): A mail rename domain name (experimental)
-    RRType_NULL, // NOTE(rick): A null RR (experimental)
-    RRType_WKS, // NOTE(rick): A well known service description
-    RRType_PTR, // NOTE(rick): A domain name pointer
-    RRType_HINFO, // NOTE(rick): Host information
-    RRType_MINFO, // NOTE(rick): Mailbox or mail list information
-    RRType_MX, // NOTE(rick): Mail exchange
-    RRType_TXT, // NOTE(rick): Text strings
-
-    RRType_Count,
-};
-
-inline uint32_t
-StringToPacketNameFormat(uint8_t *Buffer, uint8_t *String)
-{
-    uint8_t *WritePtr = Buffer;
-    uint8_t *SequenceStart = String;
-    for(uint8_t *StringAt = String; ; ++StringAt)
-    {
-        uint8_t ThisCharacter = StringAt[0];
-        if((ThisCharacter == '.') || (ThisCharacter == 0))
-        {
-            uint32_t Length = StringAt - SequenceStart;
-            *WritePtr++ = Length;
-            memcpy(WritePtr, SequenceStart, Length);
-            WritePtr += Length;
-
-            ++StringAt;
-            SequenceStart = StringAt;
-        }
-
-        if(ThisCharacter == 0)
-        {
-            *WritePtr++ = 0;
-            break;
-        }
-    }
-
-    return(WritePtr - Buffer);
-}
+void ParseNameForRecord(uint8_t *Response, uint16_t OffsetToName, char *NameBuffer);
+#include "dns_rr_handler.cpp"
+#include "dns_app.cpp"
 
 inline void
 ParseNameForRecord(uint8_t *Response, uint16_t OffsetToName, char *NameBuffer)
@@ -169,62 +53,35 @@ ParseNameForRecord(uint8_t *Response, uint16_t OffsetToName, char *NameBuffer)
     }
 }
 
-#define RESOURCE_RECORD_HANDLER(name) b32 name(uint8_t *Data, uint16_t DataLength)
-typedef RESOURCE_RECORD_HANDLER(resource_record_handler);
 
-// NOTE(rick): Parse internet address record
-//Parse_A_IN(uint8_t *Data, uint16_t DataLength)
-static RESOURCE_RECORD_HANDLER(Parse_A_IN)
+inline uint32_t
+StringToPacketNameFormat(uint8_t *Buffer, uint8_t *String)
 {
-    b32 Result = false;
-
-    // NOTE(rick): This is an IP address, 4 octets, we should expect a length of
-    // 4 followed by 4 octets representing the IP.
-    if(DataLength == 4)
+    uint8_t *WritePtr = Buffer;
+    uint8_t *SequenceStart = String;
+    for(uint8_t *StringAt = String; ; ++StringAt)
     {
-        char IPBuffer[16] = {0};
-        snprintf(IPBuffer, ArrayCount(IPBuffer), "%d.%d.%d.%d\0",
-                 Data[0], Data[1], Data[2], Data[3]);
-        printf("Address: %s\n", IPBuffer);
-        Result = true;
+        uint8_t ThisCharacter = StringAt[0];
+        if((ThisCharacter == '.') || (ThisCharacter == 0))
+        {
+            uint32_t Length = StringAt - SequenceStart;
+            *WritePtr++ = Length;
+            memcpy(WritePtr, SequenceStart, Length);
+            WritePtr += Length;
+
+            ++StringAt;
+            SequenceStart = StringAt;
+        }
+
+        if(ThisCharacter == 0)
+        {
+            *WritePtr++ = 0;
+            break;
+        }
     }
 
-    return(Result);
+    return(WritePtr - Buffer);
 }
-
-static RESOURCE_RECORD_HANDLER(Parse_CNAME_IN)
-{
-    char Buffer[512] = {0};
-    ParseNameForRecord(Data, 0, Buffer);
-    printf("CNAME: %s\n", Buffer);
-    return(true);
-}
-
-//typedef b32 (* resource_record_handler)(uint8_t *, uint16_t);
-static resource_record_handler *ResourceRecordHandlerTable[RRType_Count][RRClass_Count] =
-{
-    {0, 0, 0, 0, 0},
-    {0, Parse_A_IN, 0, 0, 0},
-    {0, 0, 0, 0, 0},
-    {0, 0, 0, 0, 0},
-    {0, 0, 0, 0, 0},
-    {0, Parse_CNAME_IN, 0, 0, 0},
-    {0, 0, 0, 0, 0},
-    {0, 0, 0, 0, 0},
-    {0, 0, 0, 0, 0},
-    {0, 0, 0, 0, 0},
-    {0, 0, 0, 0, 0},
-    {0, 0, 0, 0, 0},
-    {0, 0, 0, 0, 0},
-    {0, 0, 0, 0, 0},
-    {0, 0, 0, 0, 0},
-    {0, 0, 0, 0, 0},
-    {0, 0, 0, 0, 0},
-};
-
-#define DNS_ID 0x6969
-#define MAX_PACKET_SIZE 4096
-#define DNS_PORT 53
 
 inline void
 SetDNSQueryHeader(dns_header *Header)
@@ -240,15 +97,12 @@ ParseDNSResponse(uint8_t *Buffer, uint32_t BufferSize, uint32_t EchoLength)
     b32 Result = false;
 
     dns_header *DNSHeader = (dns_header *)Buffer;
-    b32 IsValidResponse = ((DNSHeader->ResponseCode == 0) &&
+    b32 IsValidResponse = ((DNSHeader->ResponseCode == RCodeType_NoError) &&
                            (DNSHeader->ID == DNS_ID));
     if(IsValidResponse)
     {
         b32 IsAuthoritative = DNSHeader->AuthorativeAnswerFlag;
-        if(!IsAuthoritative)
-        {
-            printf("Non-authoritative answer:\n");
-        }
+        printf("Answer is %s.\n", IsAuthoritative ? "authoritative" : "non-authoritative");
 
         uint16_t AnswerCount = ntohs(DNSHeader->AnswerCount);
         uint8_t *AnswersBegin = Buffer + EchoLength;
@@ -291,65 +145,36 @@ ParseDNSResponse(uint8_t *Buffer, uint32_t BufferSize, uint32_t EchoLength)
     }
     else
     {
-        fprintf(stderr, "Invalid DNS Response\n");
+        switch(DNSHeader->ResponseCode)
+        {
+            case RCodeType_FormatError:
+            {
+                fprintf(stderr, "Format error - Name server was unable to interpret the query.\n");
+            } break;
+            case RCodeType_ServerFailure:
+            {
+                fprintf(stderr, "Server failure - Name server was unable to process the query.\n");
+            } break;
+            case RCodeType_NameError:
+            {
+                fprintf(stderr, "Name error - Domain does not exist.\n");
+            } break;
+            case RCodeType_NotImplemented:
+            {
+                fprintf(stderr, "Not implemented - Name server does not support this kind of query.\n");
+            } break;
+            case RCodeType_Refused:
+            {
+                fprintf(stderr, "Refused - Name server refused to perform the specified operation.\n");
+            } break;
+            default:
+            {
+                fprintf(stderr, "Invalid DNS Response\n");
+            } break;
+        }
     }
 
     return(Result);
-}
-
-struct app_context
-{
-    b32 IsDebug;
-    char *DebugFileName;
-
-    char *DomainName;
-    char *DNSServer;
-
-    char *DumpName;
-    b32 DumpToFile;
-};
-
-static void
-ParseCommandLineArguments(int32_t ArgCount, char **Args, app_context *Context)
-{
-    if(Context)
-    {
-        for(int32_t ArgIndex = 1; ArgIndex < ArgCount; ++ArgIndex)
-        {
-            if(strcmp("--debug", Args[ArgIndex]) == 0)
-            {
-                Context->IsDebug = true;
-                Context->DebugFileName = Args[++ArgIndex];
-            }
-            else if(strcmp("--server", Args[ArgIndex]) == 0)
-            {
-                Context->DNSServer = Args[++ArgIndex];
-            }
-            else if(strcmp("--dump", Args[ArgIndex]) == 0)
-            {
-                Context->DumpToFile = true;
-                Context->DumpName = Args[++ArgIndex];
-            }
-            else
-            {
-                if(Args[ArgIndex][0] != '-')
-                {
-                    Context->DomainName = Args[ArgIndex];
-                }
-            }
-        }
-    }
-};
-
-static void
-PrintHelp(char *Command)
-{
-    fprintf(stderr, "Usage: %s [url] [options]\n", Command);
-    fprintf(stderr, "  %-24s%-56s\n", "url", "The URL to lookup.");
-    fprintf(stderr, "options:\n");
-    fprintf(stderr, "  %-24s%-56s\n", "--debug filename", "Reads a DNS response from the file specified by filename.");
-    fprintf(stderr, "  %-24s%-56s\n", "--server address", "Address to send the DNS query to. Default is Google \"8.8.8.8\".");
-    fprintf(stderr, "  %-24s%-56s\n", "--dump filename", "Dumps the DNS response to the file spcified by filename.");
 }
 
 int main(int32_t ArgCount, char **Args)
@@ -361,12 +186,11 @@ int main(int32_t ArgCount, char **Args)
     }
 
     app_context Context = {0};
-    ParseCommandLineArguments(ArgCount, Args, &Context);
-
-    if(!Context.DomainName)
+    b32 CommandsResult = ParseCommandLineArguments(ArgCount, Args, &Context);
+    if(!CommandsResult)
     {
-        fprintf(stderr, "Missing required argument: [url]\n");
-        return(4);
+        PrintHelp(Args[0]);
+        return(1);
     }
 
     if(Context.IsDebug)
@@ -392,6 +216,12 @@ int main(int32_t ArgCount, char **Args)
     }
     else
     {
+        if(!Context.DomainName)
+        {
+            fprintf(stderr, "Missing required argument: [url]\n");
+            return(4);
+        }
+
         WSADATA WSAData = {0};
         if(WSAStartup(MAKEWORD(2, 2), &WSAData) != 0)
         {
@@ -452,7 +282,7 @@ int main(int32_t ArgCount, char **Args)
                 sockaddr_in ReceiveServerAddr = {0};
                 int32_t ServerAddrSize = sizeof(ReceiveServerAddr);
                 int32_t BytesReceived = recvfrom(Socket, (char *)ReceiveBuffer, MAX_PACKET_SIZE, 0, (sockaddr *)&ReceiveServerAddr, &ServerAddrSize);
-                printf("Response from: %s\n", inet_ntoa(ReceiveServerAddr.sin_addr));
+                printf("Response from %s:\n", inet_ntoa(ReceiveServerAddr.sin_addr));
                 if(BytesReceived <= 0)
                 {
                     fprintf(stderr, "recvfrom failed (%d)\n", WSAGetLastError());
